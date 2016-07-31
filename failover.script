@@ -9,6 +9,13 @@
 # Define the distance increase of a route when it fails
 :local DistanceIncrease 2
 
+# Script notes:
+# Requires "pure IP" connectivity, as it relies on /ip dhcp-client; pppoe will likely not work.
+
+# Setup notes:
+# Create this script as script named "failover", permissions=write.
+# Create schedule: /system schedule add interval=5s name=failover on-event="/system script run failover" policy=read,write,test
+
 # ----------------------------------------------------------------------------
 :global FailoverState
 # first time init
