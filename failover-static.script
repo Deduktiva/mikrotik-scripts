@@ -1,0 +1,78 @@
+# WAN interface names and default distances
+:local ISPConfig {
+  {interface="internet"; distance=20; gateway="192.168.20.1"};
+  {interface="huawei"; distance=21; gateway="192.168.21.1"};
+}
+# google public dns
+:local PingTarget 8.8.8.8
+:local FailThreshold 3
+# Define the distance increase of a route when it fails
+:local DistanceIncrease 2
+
+# Script notes:
+# Requires "pure IP" connectivity, as it relies on /ip dhcp-client; pppoe will likely not work.
+
+# Setup notes:
+# Create this script as script named "failover", permissions=write.
+# Create schedule: /system schedule add interval=5s name=failover on-event="/system script run failover" policy=read,write,test
+
+# ----------------------------------------------------------------------------
+:global FailoverState
+# first time init
+:if ([:typeof $FailoverState] = "nothing") do={
+  :set FailoverState {{ failcount=0 }; { failcount=0 }}
+}
+
+:foreach isp,ispConfig in=$ISPConfig do={
+    # This variable will be used to keep results of individual ping attempts
+    :local Table ("isp" . [:tostr ($isp + 1)])
+    :local Interface ($ispConfig->"interface")
+    :local Distance ($ispConfig->"distance")
+    :local Gateway ($ispConfig->"gateway")
+
+    :put "found $Interface Gateway: $Gateway"
+    :if ([:typeof $Gateway] != "nothing") do={
+        # Create check table if it does not exist yet.
+        :if ([:len [/ip route find dst-address="0.0.0.0/0" && routing-mark=$Table && static]] = 0) do={
+            /ip route add dst-address="0.0.0.0/0" routing-mark=$Table gateway=$Gateway
+        }
+        # If gateway for $Interface has changed, update our check table route.
+        :foreach i in [/ip route find dst-address="0.0.0.0/0" && routing-mark=$Table && static] do={
+            :if ([/ip route get $i gateway] != $Gateway) do={
+                :put "update $Interface check route in table $Table"
+                /ip route set $i gateway=$Gateway
+            }
+        }
+
+        # Run Ping check
+        :local PingResult [ping $PingTarget count=1 routing-table=$Table interface=$Interface]
+        :put "$Table ping result: $PingResult"
+        :if ($PingResult = 0) do={
+            :if (($FailoverState->$isp->"failcount") < ($FailThreshold)) do={
+                :set ($FailoverState->$isp->"failcount") (($FailoverState->$isp->"failcount") + 1)
+                :if (($FailoverState->$isp->"failcount") = $FailThreshold) do={
+                    :put "$Interface went bad"
+                    :log warning "Failover: $Interface can NOT reach $PingTarget, increasing distance."
+                    :foreach i in=[/ip route find gateway=$Gateway && routing-mark!=$Table] do={
+                        /ip route set $i distance=($Distance + $DistanceIncrease)
+                    }
+                }
+            }
+        }
+        :if ($PingResult = 1) do={
+            :if (($FailoverState->$isp->"failcount") > 0) do={
+                :set ($FailoverState->$isp->"failcount") (($FailoverState->$isp->"failcount") - 1)
+                :if (($FailoverState->$isp->"failcount") = 0) do={
+                    :put "$Interface went good"
+                    :log warning "Failover: $Interface can reach $PingTarget again, restoring distance."
+                    :foreach i in=[/ip route find gateway=$Gateway && routing-mark!=$Table] do={
+                        /ip route set $i distance=$Distance
+                    }
+                }
+            }
+        }
+        :put ("$Interface failcount: ".[:tostr ($FailoverState->$isp->"failcount")])
+    } else={
+        :log warning "Failover: No gateway found for interface $Interface"
+    }
+}
